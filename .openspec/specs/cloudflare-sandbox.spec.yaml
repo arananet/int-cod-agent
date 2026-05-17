@@ -1,0 +1,110 @@
+# Feature Spec — created by scripts/openspec scaffold
+# Fill in all sections before moving status to 'review'.
+# Acceptance criteria are your definition of done — be specific.
+
+title: "Cloudflare Sandbox"
+slug: "cloudflare-sandbox"
+type: feature
+# status values: draft | review | approved
+status: draft
+
+author: "Claude"
+created_at: "2026-05-17"
+updated_at: "2026-05-17"
+
+roles:
+  implementer: "@arananet"
+  reviewer: "@arananet"
+  qa: "@arananet"
+  product_owner: "@arananet"
+
+description: |
+  The foundational isolation layer for int-cod-agent. The orchestrator
+  spins up a per-session Cloudflare Container (via the Cloudflare
+  Sandbox SDK + a Durable Object) for every agent run, exposes a small
+  command surface (exec / file ops / git ops) to the OpenCode harness
+  that will live on top of it, and tears the container down when the
+  session ends.
+
+  This is the "isolate first, then give full permissions inside the
+  boundary" pattern from Stripe's Minions and Ramp's Inspect — applied
+  to Cloudflare instead of EC2 or Modal. Sessions are cattle, not pets:
+  cheap to create, never reused across users, drawn from a pre-warmed
+  pool so the cold-start cost stays under the agent's perceived latency
+  budget.
+
+acceptance_criteria:
+  - "Given the orchestrator is deployed, when a client POSTs to /sessions with a target repo identifier, then a fresh Cloudflare Container session is provisioned and a session ID + Durable Object endpoint URL are returned within 5 seconds at P95."
+  - "Given a session exists, when the orchestrator calls exec / readFile / writeFile / listDir / gitDiff / gitCommit / gitPush against it, then each operation runs inside that session's container and returns within its stated timeout, scoped to the per-session workspace directory."
+  - "Given two concurrent sessions A and B, when A writes a file under its workspace, then B cannot read or list that file (filesystem isolation is enforced by container boundaries, not application-level checks)."
+  - "Given a pre-warmed pool of N idle containers is configured, when a session is requested, then provisioning draws from the pool when available and replenishes the pool asynchronously after the request."
+  - "Given a session has been idle for longer than the configured timeout (default 15 minutes), when the reaper runs, then the container is terminated and the Durable Object state is cleaned up."
+  - "Given a session is active, when an outbound network request from inside the container targets a host outside the configured allowlist (github.com, api.github.com, registry.npmjs.org, OpenCode model endpoints), then the request fails with a network error."
+  - "Given a client calls DELETE /sessions/:id, when the call returns 200, then the container is terminated within 2 seconds and a subsequent operation against that session returns 404."
+
+test_plan:
+  - "Unit test: SessionManager Durable Object — session ID generation is unique and idempotent on retry; idle-timeout reaper marks expired sessions correctly without race conditions."
+  - "Unit test: egress-allowlist policy parser — accepts the documented allowlist hosts, rejects everything else, including wildcard-attack inputs."
+  - "Integration test (wrangler dev / miniflare): POST /sessions → exec('echo hello') → asserts stdout == 'hello\\n' → DELETE /sessions/:id → asserts 404 on follow-up exec. Covers ACs #1, #2, #7."
+  - "Integration test: two concurrent sessions; session A writes /workspace/secret.txt, session B attempts readFile('/workspace/secret.txt') and listDir('/workspace') → both return 'not found'. Covers AC #3."
+  - "Integration test: pre-warmed pool — configure pool size = 2, fire 3 sequential requests, assert first 2 are served from pool (<1s) and pool refills to 2 within the configured replenish window. Covers AC #4."
+  - "Integration test: idle reaper — create session, advance virtual clock past idle timeout, run reaper, assert session is terminated and DO state cleared. Covers AC #5."
+  - "Integration test: egress allowlist — from inside the container, curl github.com → 200; curl example.com → network error. Covers AC #6."
+  - "Performance test: cold-start latency (no pool) measured over 50 invocations — P95 < 5s. Covers the SLO in AC #1."
+
+qa_notes: |
+  Cloudflare Containers is a relatively new product surface. Two
+  things worth verifying manually before merge:
+  1. The egress allowlist behaviour under load — Cloudflare's network
+     policies are advertised as enforced at the runtime boundary, but
+     verify by hand that a malicious payload can't escape.
+  2. Pool replenishment under burst load — pool size 2 with 20
+     simultaneous requests should still produce 20 sessions; confirm
+     no session leaks (zombie containers, orphaned DO state).
+
+out_of_scope:
+  - "The OpenCode harness itself (separate spec: opencode-harness)."
+  - "Slack / CLI / web invocation surface (separate spec: slack-invocation)."
+  - "PR creation, branch naming, and the broader git workflow above gitPush (separate spec)."
+  - "The pre-baked container image build pipeline. This spec assumes a built image tag is provided via wrangler config; image-baking is its own spec."
+  - "Long-running dev-server sessions with browser preview (deferred — not in Phase 1)."
+  - "A Railway-backed alternative sandbox tier (explicitly dropped per project direction: Cloudflare-only)."
+  - "Cost accounting / per-session billing (separate spec)."
+
+implementation_skill: null
+  # Could escalate to "devops-pro" once we start hitting Cloudflare-specific
+  # config (wrangler.toml, Containers limits, networking rules) — leave null
+  # for the initial scaffolding work.
+
+eval_plan:
+  # This spec is deterministic infrastructure (container lifecycle + APIs).
+  # No LLM in the loop — test_plan is sufficient.
+  scenarios: []
+  metrics: []
+
+technical_notes: |
+  Stack assumptions (locked in onboarding):
+  - TypeScript on Cloudflare Workers for the orchestrator
+  - Durable Objects for per-session state and the pool manager
+  - Cloudflare Containers via the Sandbox SDK for the actual execution
+    environment
+  - Wrangler for deploys; miniflare for local integration tests
+  - Pre-baked image referenced by tag in wrangler.toml; image build
+    is a separate spec
+
+  Out-of-band dependencies the orchestrator needs at deploy time:
+  - CLOUDFLARE_API_TOKEN with Containers write
+  - GitHub App credentials (for the gitPush AC — separate spec covers
+    the PR-creation half; this spec only needs the push to succeed)
+  - Image tag for the pre-baked workspace
+
+  Open questions to resolve during implementation, not now:
+  - Exact pool size default (start small — 2 — and tune later)
+  - Whether to use one DO per session or one DO per pool with a session
+    map; first cut is one DO per session for simpler reasoning
+
+linked_issues: []
+  # - "https://github.com/arananet/int-cod-agent/issues/1"
+
+linked_prs: []
+  # - "https://github.com/arananet/int-cod-agent/pull/1"
