@@ -1,0 +1,134 @@
+# Feature Spec — created by scripts/openspec scaffold
+# Fill in all sections before moving status to 'review'.
+# Acceptance criteria are your definition of done — be specific.
+
+title: "OpenCode Harness"
+slug: "opencode-harness"
+type: feature
+# status values: draft | review | approved
+status: draft
+
+author: "Claude"
+created_at: "2026-05-17"
+updated_at: "2026-05-17"
+
+roles:
+  implementer: "@arananet"
+  reviewer: "@arananet"
+  qa: "@arananet"
+  product_owner: "@arananet"
+
+description: |
+  The agent loop itself. Wraps the OpenCode TypeScript SDK to execute
+  a single coding task inside a cloudflare-sandbox session: loads the
+  target OpenSpec spec, hydrates the agent context from its
+  description / acceptance_criteria / test_plan / out_of_scope,
+  exposes a curated tool subset bound to the sandbox's exec / file /
+  git surface, runs the OpenCode loop to a terminal state, and emits
+  a structured summary.
+
+  This is the layer the orchestrator calls. It owns model selection,
+  tool curation, context loading, and the stopping policy. It does
+  NOT own session lifecycle (cloudflare-sandbox spec) or invocation
+  surfaces (separate spec). The harness's job is "given a sandbox
+  and a spec slug, produce a branch with code and a summary."
+
+  Tool curation is deliberate: per Stripe's Minions experience,
+  giving the agent 500 tools wastes tokens and degrades selection
+  quality. The default tool set is small and scoped to the sandbox.
+  Stopping policy follows Stripe's "max two CI runs" principle —
+  bounded retries beat infinite loops.
+
+acceptance_criteria:
+  - "Given a task input {spec_slug, target_repo, base_branch, sandbox_session_id}, when the harness runs, then it loads .openspec/specs/<slug>.spec.yaml from the sandbox workspace, validates required fields, and starts an OpenCode session pre-loaded with the spec's description / acceptance_criteria / test_plan / out_of_scope as system context."
+  - "Given a loaded spec whose status is 'draft', when the harness is invoked, then it refuses to run and returns a structured error {code: 'SPEC_NOT_READY', message, spec_slug} consistent with the .github/AGENTS.md hard rules."
+  - "Given the harness is running, when the OpenCode agent makes a tool call, then only tools from the curated default set (sandbox exec, readFile, writeFile, listDir, gitDiff, gitCommit, gitPush, runTests, readSpec) are available — raw network calls, arbitrary HTTP, and any non-sandbox tool are absent from the tool registry exposed to the agent."
+  - "Given the OpenCode loop is executing, when the test command from .openspec/config.yaml (testing.test_command) fails after the agent has produced code, then the harness allows the agent exactly ONE retry attempt before terminating with status 'tests_failed'."
+  - "Given the OpenCode loop is executing, when the agent's total turn count exceeds the configured max-iteration cap (default 50), then the harness terminates with status 'iteration_cap_hit' and does not start another turn."
+  - "Given the harness terminates for any reason, when termination occurs, then it emits a single summary JSON {status: 'success'|'tests_failed'|'iteration_cap_hit'|'spec_not_ready'|'error', branch, sha, ac_results[], cost_usd, turns, duration_ms, error_message?} that the orchestrator can persist."
+  - "Given the harness is configured via env vars OPENCODE_MODEL (default 'claude-sonnet-4-6') and OPENCODE_API_KEY, when it runs, then model selection uses those env vars and per-run cost is computed from OpenCode's token-usage events and included in the summary."
+  - "Given the harness is running, when events occur (turn_start, tool_call, tool_result, turn_end, terminal_state), then each event is emitted to a stream the orchestrator can subscribe to (SSE or websocket), enabling real-time forwarding to Slack / CLI / web surfaces."
+
+test_plan:
+  - "Unit test: spec loader — parses a valid spec file; rejects with explicit errors when title / acceptance_criteria / test_plan / status are missing; rejects status=draft with SPEC_NOT_READY. Covers ACs #1, #2."
+  - "Unit test: tool registry curator — given the harness config, the exposed tool list equals exactly the documented default set; no extra tools leak in. Covers AC #3."
+  - "Unit test: stopping policy — given a mocked OpenCode loop, retry happens exactly once on test failure (not zero, not two). Covers AC #4."
+  - "Unit test: iteration cap — given a mocked loop that never terminates, the harness stops at turn N+1 with status iteration_cap_hit. Covers AC #5."
+  - "Unit test: summary shape — termination from each terminal state produces a JSON object validating against the documented schema. Covers AC #6."
+  - "Integration test (against a real sandbox + a toy repo): trivial spec 'create a file called HELLO.md at the repo root' — happy path produces a branch, a commit, a passing test, and a summary with status=success. Covers ACs #1, #6, #7."
+  - "Integration test: invoke against a draft spec — assert SPEC_NOT_READY error is returned and no commits land in the sandbox. Covers AC #2."
+  - "Integration test: deliberately impossible spec ('change the value of pi to 4 in math.ts') — assert termination at iteration cap, no successful PR. Covers AC #5."
+  - "Integration test: event stream — count and type-check events emitted during the toy happy-path run; assert all five event types appear in order. Covers AC #8."
+
+qa_notes: |
+  OpenCode is still pre-1.0; pin the version in package.json and
+  re-test the full integration suite on every upgrade. The SDK's
+  event schema in particular has changed between minor versions.
+
+  Cost reporting depends on OpenCode emitting per-turn token-usage
+  events; verify this against the SDK version pinned at implementation
+  time. If the SDK stops emitting them, fall back to estimating from
+  prompt/response lengths and document the approximation explicitly.
+
+out_of_scope:
+  - "Cloudflare Container session lifecycle (dependency: cloudflare-sandbox spec — this spec assumes a session_id is passed in)."
+  - "Invocation surfaces: Slack slash command, CLI, web UI (separate spec)."
+  - "PR creation, branch naming conventions, and GitHub App auth (separate spec; the harness only does gitPush — opening the PR is downstream)."
+  - "Multi-agent / parent-child / fan-out sessions (Ramp's child-session model; Phase 2)."
+  - "Visual / DOM-based verification (Ramp's Chrome-extension pattern; Phase 2 once a web UI exists)."
+  - "Agent council code review (Coinbase pattern; Phase 2)."
+  - "Custom tools beyond the curated sandbox set (each new tool ships as its own spec when needed)."
+  - "Multi-model fallback / model routing (Coinbase pattern; single-model in Phase 1)."
+
+implementation_skill: null
+  # Could escalate to "backend-pro" once we start integrating the
+  # OpenCode SDK and event stream wiring. Leave null for the scaffolding.
+
+eval_plan:
+  # This spec wraps an LLM-backed agent. The toy-repo integration test
+  # in test_plan doubles as an eval scenario, but more would be useful
+  # before promoting to production. Captured here for the harness
+  # repo's evals/ directory.
+  scenarios: []
+    # - ".harness/scenarios/toy-create-file.scenario.yaml"
+    # - ".harness/scenarios/refactor-helper.scenario.yaml"
+    # - ".harness/scenarios/impossible-task.scenario.yaml"
+  metrics: []
+    # - task_success
+    # - tool_accuracy
+    # - refusal_accuracy
+    # - latency_ms
+    # - cost_estimate
+
+technical_notes: |
+  Stack:
+  - OpenCode TypeScript SDK, version pinned in package.json
+  - Runs inside the orchestrator (Cloudflare Worker) and talks to
+    the sandbox session via the cloudflare-sandbox spec's HTTP API
+  - Event stream: SSE (simpler in a Worker) unless we discover a
+    real need for bidirectional websockets
+
+  Tool wiring:
+  - Each sandbox API surface becomes one OpenCode tool with a typed
+    JSON schema
+  - readSpec is a virtual tool that reads from .openspec/specs/ via
+    the sandbox's readFile — it does NOT permit writes (the agent
+    must not mutate its own goal)
+  - runTests is a thin wrapper over exec(testing.test_command from
+    config.yaml) with the working directory set to the workspace root
+
+  Stopping policy:
+  - One retry on test failure (per Stripe's "max two CI runs")
+  - Iteration cap default 50 (configurable)
+  - No third attempt — hand back to a human via the summary
+
+  Cost reporting:
+  - Aggregate from OpenCode's token-usage events
+  - Convert to USD using the model's published per-token rate
+    (table baked into config; updated when prices change)
+
+linked_issues: []
+  # - "https://github.com/arananet/int-cod-agent/issues/2"
+
+linked_prs: []
+  # - "https://github.com/arananet/int-cod-agent/pull/2"
